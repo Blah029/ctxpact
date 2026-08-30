@@ -104,6 +104,13 @@ class SequenceDetector:
         else:
             split_point = split_from_retention
 
+        # If the split lands mid-turn, the retained region would start with an
+        # orphaned tool result (a tool message with no preceding assistant
+        # tool_call — an invalid OpenAI sequence). Walk back so the retained
+        # region starts at the assistant message that issued the call(s).
+        while split_point > 0 and non_system[split_point].get("role") == "tool":
+            split_point -= 1
+
         compactible_region = non_system[:split_point]
         retained_region = non_system[split_point:]
 
