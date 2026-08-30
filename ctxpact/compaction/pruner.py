@@ -74,7 +74,7 @@ class DynamicContextPruner:
         """Return the messages eligible for in-place truncation/stripping.
 
         All messages except the last ``retention_window`` entries. If the
-        history is no longer than the window, everything is eligible.
+        history is no longer than the window, nothing is eligible.
         Returns a slice of the same dict objects, so in-place mutations
         still apply to ``result.messages``.
 
@@ -82,8 +82,9 @@ class DynamicContextPruner:
         corresponds to the *current* end of the list, even after
         dedup/superseded-write removal has shifted earlier messages.
         """
-        if self.retention_window > 0 and len(result.messages) > self.retention_window:
-            return result.messages[: -self.retention_window]
+        if self.retention_window > 0:
+            cut = len(result.messages) - self.retention_window
+            return result.messages[: max(0, cut)]
         return result.messages
 
     # ------------------------------------------------------------------
@@ -145,16 +146,14 @@ class DynamicContextPruner:
                         tool_call_indices.append(seen[key])
                     seen[key] = i
 
-        # Remove duplicate messages (earlier occurrences)
+        # Remove duplicate messages (earlier occurrences) together with all
+        # of their tool results. An assistant message may carry several
+        # parallel tool calls, so every result belonging to it must be
+        # removed — otherwise the survivors are orphaned (tool messages
+        # with no matching assistant tool call).
         if tool_call_indices:
             indices_to_remove = set(tool_call_indices)
-            # Also remove the corresponding tool result messages
-            expanded_indices: set[int] = set()
-            for idx in indices_to_remove:
-                expanded_indices.add(idx)
-                # Check next message — if it's a tool result, remove it too
-                if idx + 1 < len(result.messages) and result.messages[idx + 1].get("role") == "tool":
-                    expanded_indices.add(idx + 1)
+            expanded_indices = self._expanded_with_tool_results(result.messages, indices_to_remove)
 
             original_len = len(result.messages)
             result.messages = [
@@ -185,21 +184,46 @@ class DynamicContextPruner:
                         except (json.JSONDecodeError, AttributeError):
                             pass
 
-        # Remove all but the last write for each path
+        # Remove all but the last write for each path, together with all
+        # of each removed assistant message's tool results.
         indices_to_remove: set[int] = set()
         for path, indices in write_indices.items():
             if len(indices) > 1:
                 for idx in indices[:-1]:  # Keep last, remove earlier
                     indices_to_remove.add(idx)
-                    if idx + 1 < len(result.messages) and result.messages[idx + 1].get("role") == "tool":
-                        indices_to_remove.add(idx + 1)
 
         if indices_to_remove:
+            indices_to_remove = self._expanded_with_tool_results(result.messages, indices_to_remove)
             original_len = len(result.messages)
             result.messages = [
                 m for i, m in enumerate(result.messages) if i not in indices_to_remove
             ]
             result.superseded_writes = original_len - len(result.messages)
+
+    @staticmethod
+    def _expanded_with_tool_results(messages: list[dict[str, Any]], indices: set[int]) -> set[int]:
+        """Expand assistant message indices to include all of their tool results.
+
+        An assistant message may contain several parallel tool calls. Its
+        results are the consecutive tool messages that follow it and whose
+        tool_call_id matches one of its call ids. Removing only the first
+        one would orphan the rest, producing an invalid message sequence.
+        """
+        expanded: set[int] = set(indices)
+        for idx in indices:
+            call_ids = {
+                tc.get("id")
+                for tc in (messages[idx].get("tool_calls") or [])
+                if tc.get("id")
+            }
+            j = idx + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                if messages[j].get("tool_call_id") in call_ids:
+                    expanded.add(j)
+                    j += 1
+                else:
+                    break
+        return expanded
 
     # ------------------------------------------------------------------
     # Step 3 & 4 — retention-window aware in-place mutations
