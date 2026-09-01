@@ -24,6 +24,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ctxpact.compaction.engine import CompactionEngine
+from ctxpact.compaction.prompts import (
+    FULL_HANDOFF_PROMPT,
+    HANDOFF_MARKER,
+    HANDOFF_REMINDER_PROMPT,
+    REMINDER_MARKER,
+)
 from ctxpact.config import CtxpactConfig, load_config
 from ctxpact.isolation.graph_manager import GraphManager
 from ctxpact.isolation.isolator import isolate_context
@@ -71,6 +77,37 @@ class AppState:
 
     async def stop(self) -> None:
         await self.health_checker.stop()
+
+
+# ---------------------------------------------------------------------------
+# Handoff helpers
+# ---------------------------------------------------------------------------
+
+def _content_text(msg: dict[str, Any]) -> str:
+    """Plain text of a message's content (handles str, multi-part lists, None)."""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return content if isinstance(content, str) else ""
+
+
+def _handoff_decision(outgoing_messages: list[dict[str, Any]]) -> tuple[str | None, dict | None]:
+    """Stateless handoff decision from conversation content.
+
+    Clients may be stateless per request (AnythingLLM sends no session id),
+    so dedup happens via markers the model was asked to emit in earlier
+    replies:
+
+      no HANDOFF_MARKER in history      -> ("full", system message)
+      HANDOFF_MARKER, no REMINDER       -> ("reminder", system message)
+      both markers present              -> (None, None)
+    """
+    text = " ".join(_content_text(m) for m in outgoing_messages)
+    if HANDOFF_MARKER not in text:
+        return "full", {"role": "system", "content": FULL_HANDOFF_PROMPT}
+    if REMINDER_MARKER not in text:
+        return "reminder", {"role": "system", "content": HANDOFF_REMINDER_PROMPT}
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +265,7 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
                 logger.warning(f"GOG isolation failed (continuing without): {e}")
 
         # ---- Compaction Check ----
+        handoff_due = False
         if state.compaction:
             active_provider = state.router.get_active_provider()
             should_compact, reason = state.compaction.should_compact(
@@ -270,6 +308,7 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
                     )
 
                     if result.compacted:
+                        handoff_due = True
                         outgoing_messages = result.messages
                         # Update session with compacted history
                         session.messages = [
@@ -399,6 +438,30 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
                     )
                 except Exception as e:
                     logger.error(f"Chunked processing failed: {e}", exc_info=True)
+
+        # ---- Handoff Injection ----
+        # After compaction, tell the model that history was just compacted and to
+        # hand the user a paste-ready summary for a new chat. Full once per chat,
+        # reminder on the 2nd compaction, silent after (stateless, marker-based).
+        # Per-request only: never written into session.messages.
+        if handoff_due and state.config.compaction.handoff.enabled and outgoing_messages:
+            kind, injection = _handoff_decision(outgoing_messages)
+            if kind is None:
+                logger.debug(f"[{session_id[:8]}] Handoff skipped: already done in this chat")
+            elif outgoing_messages[-1].get("role") != "user":
+                # Tool-loop guard: don't derail mid-agentic tool loops
+                logger.debug(f"[{session_id[:8]}] Handoff skipped: not at a user-turn boundary")
+            elif (
+                count_messages_tokens(outgoing_messages)
+                + count_messages_tokens([injection])
+                + max_tokens_param
+                > int(max_ctx * 0.95)
+            ):
+                # Overflow guard: don't push the request past the model's window
+                logger.warning(f"[{session_id[:8]}] Handoff skipped: injection would overflow context")
+            else:
+                outgoing_messages.insert(0, injection)
+                logger.info(f"[{session_id[:8]}] Handoff injection: {kind}")
 
         # ---- Forward to Provider ----
         # Strip session-specific fields, forward standard OpenAI params

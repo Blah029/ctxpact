@@ -96,6 +96,17 @@ class OversizedConfig(BaseModel):
     book_path: str = "./books/"
 
 
+class HandoffConfig(BaseModel):
+    """Handoff injection on compaction (reuses compaction triggers).
+
+    Instructs the model to warn the user and give a paste-ready summary for a
+    new chat. Full once per chat, reminder on 2nd compaction, silent after.
+    Deduplicated statelessly via markers (see compaction/prompts.py).
+    """
+
+    enabled: bool = False
+
+
 class CompactionConfig(BaseModel):
     enabled: bool = True
     triggers: TriggersConfig = Field(default_factory=TriggersConfig)
@@ -103,6 +114,7 @@ class CompactionConfig(BaseModel):
     stage2_summarize: SummarizeConfig = Field(default_factory=SummarizeConfig)
     preserve: PreserveConfig = Field(default_factory=PreserveConfig)
     oversized: OversizedConfig = Field(default_factory=OversizedConfig)
+    handoff: HandoffConfig = Field(default_factory=HandoffConfig)
 
 
 class ContextIsolationConfig(BaseModel):
