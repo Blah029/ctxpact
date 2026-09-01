@@ -74,6 +74,11 @@ compaction:
     rlm_max_llm_calls: 15
     book_storage: "memory"    # "memory" or "disk"
 
+  handoff:
+    enabled: false            # true = on compaction, instruct the model to warn the
+                              # user and give a paste-ready summary for a new chat
+                              # (full once per chat, reminder on 2nd compaction)
+
 context_isolation:
   enabled: false          # Set to true and configure repo_path to enable GOG
   repo_path: null         # Path to your codebase root, e.g. "/Users/manoj/clawdbot"

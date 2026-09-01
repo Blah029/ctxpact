@@ -67,6 +67,30 @@ def build_compaction_prompt(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Handoff prompts — injected into the model right after compaction
+# ---------------------------------------------------------------------------
+
+# Visible markers: the model is instructed to emit these exact lines. They are
+# scanned from conversation content (stateless) so the handoff fires once per
+# chat even when the client sends no stable session id.
+HANDOFF_MARKER = "[CTX-HANDOFF v1]"
+REMINDER_MARKER = "[CTX-REMINDER v1]"
+
+FULL_HANDOFF_PROMPT = f"""\
+The gateway has just compacted this conversation's history to fit the model's \
+context. In your reply, briefly warn the user, then provide a HANDOFF SUMMARY \
+the user can paste as the first message of a new chat to continue: task & goal, \
+key decisions, file paths / line numbers, open errors, next steps. Start the \
+summary with the exact line: {HANDOFF_MARKER}"""
+
+HANDOFF_REMINDER_PROMPT = f"""\
+The gateway compacted this conversation a second time; most earlier history is \
+now unavailable. Strongly advise the user to start a new chat using the earlier \
+handoff summary. Do not repeat the summary. Start your reply with the exact \
+line: {REMINDER_MARKER}"""
+
+
 def format_messages_for_summary(messages: list[dict]) -> str:
     """Convert a list of messages into a readable text block for summarization."""
     lines: list[str] = []
