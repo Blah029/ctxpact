@@ -1,6 +1,9 @@
 # Pi coding agent
 .development/
 
+# Custom configuraions
+config-*.yaml
+
 # Python
 __pycache__/
 *.py[cod]
