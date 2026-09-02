@@ -1,5 +1,8 @@
 # Pi coding agent
 .development/
+config-qwen-27b-g.yaml
+config-qwen-27b-r.yaml
+config-qwen-27b-q3.yaml
 
 # Python
 __pycache__/
