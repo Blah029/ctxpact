@@ -2,9 +2,7 @@
 .development/
 
 # Custom configs
-config-qwen-27b-g.yaml
-config-qwen-27b-q3.yaml
-config-qwen-27b-r.yaml
+config-*.yaml
 
 # Python
 __pycache__/
