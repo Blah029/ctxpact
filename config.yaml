@@ -75,7 +75,7 @@ compaction:
     book_storage: "memory"    # "memory" or "disk"
 
   handoff:
-    enabled: false            # true = on compaction, instruct the model to warn the
+    enabled: true             # true = on compaction, instruct the model to warn the
                               # user and give a paste-ready summary for a new chat
                               # (full once per chat, reminder on 2nd compaction)
 
