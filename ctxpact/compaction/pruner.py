@@ -7,6 +7,15 @@ content from message history using pattern matching:
   2. Strip superseded file writes (keep only latest version)
   3. Truncate long error stack traces
   4. Strip raw tool result payloads (keep status only)
+
+Retention-window aware: steps 3 and 4 only mutate messages *outside* the
+protected retention window (the last ``retention_window`` messages). The
+retention window is the live tool loop — the model's most recent
+assistant→tool round-trips — and its results are kept verbatim so the
+model always sees fresh file reads, directory listings, and error
+diagnostics. Steps 1 and 2 (dedup / superseded writes) always operate on
+the full history, but they keep the *most recent* occurrence by design,
+so the protection remains consistent.
 """
 
 from __future__ import annotations
@@ -37,10 +46,50 @@ class PruneResult:
 
 
 class DynamicContextPruner:
-    """Stateless pruner — takes messages in, returns pruned messages out."""
+    """Stateless pruner — takes messages in, returns pruned messages out.
 
-    def __init__(self, config: DcpConfig | None = None) -> None:
+    Args:
+        config: DCP feature flags (dedup, superseded writes, truncation,
+            payload stripping).
+        retention_window: Number of trailing messages protected from error
+            truncation (step 3) and tool payload stripping (step 4).
+            ``0`` = no protection (legacy behavior). Typically set to
+            ``config.stage2_summarize.retention_window`` so the pruner's
+            protected tail matches the detector's retention window exactly.
+    """
+
+    def __init__(
+        self,
+        config: DcpConfig | None = None,
+        retention_window: int = 0,
+    ) -> None:
         self.config = config or DcpConfig()
+        self.retention_window = max(0, retention_window)
+
+    # ------------------------------------------------------------------
+    # Retention-window helper
+    # ------------------------------------------------------------------
+
+    def _mutable_messages(self, result: PruneResult) -> list[dict[str, Any]]:
+        """Return the messages eligible for in-place truncation/stripping.
+
+        All messages except the last ``retention_window`` entries. If the
+        history is no longer than the window, nothing is eligible.
+        Returns a slice of the same dict objects, so in-place mutations
+        still apply to ``result.messages``.
+
+        Computed at call time (per step), so the protected tail always
+        corresponds to the *current* end of the list, even after
+        dedup/superseded-write removal has shifted earlier messages.
+        """
+        if self.retention_window > 0:
+            cut = len(result.messages) - self.retention_window
+            return result.messages[: max(0, cut)]
+        return result.messages
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
 
     def prune(self, messages: list[dict[str, Any]]) -> PruneResult:
         """Run all enabled pruning stages on a copy of messages."""
@@ -67,6 +116,11 @@ class DynamicContextPruner:
 
         return result
 
+    # ------------------------------------------------------------------
+    # Step 1 & 2 — operate on the full history, keep the most recent
+    # occurrence by design
+    # ------------------------------------------------------------------
+
     def _dedup_tool_calls(self, result: PruneResult) -> None:
         """Remove duplicate tool calls with identical arguments.
 
@@ -92,16 +146,14 @@ class DynamicContextPruner:
                         tool_call_indices.append(seen[key])
                     seen[key] = i
 
-        # Remove duplicate messages (earlier occurrences)
+        # Remove duplicate messages (earlier occurrences) together with all
+        # of their tool results. An assistant message may carry several
+        # parallel tool calls, so every result belonging to it must be
+        # removed — otherwise the survivors are orphaned (tool messages
+        # with no matching assistant tool call).
         if tool_call_indices:
             indices_to_remove = set(tool_call_indices)
-            # Also remove the corresponding tool result messages
-            expanded_indices: set[int] = set()
-            for idx in indices_to_remove:
-                expanded_indices.add(idx)
-                # Check next message — if it's a tool result, remove it too
-                if idx + 1 < len(result.messages) and result.messages[idx + 1].get("role") == "tool":
-                    expanded_indices.add(idx + 1)
+            expanded_indices = self._expanded_with_tool_results(result.messages, indices_to_remove)
 
             original_len = len(result.messages)
             result.messages = [
@@ -132,32 +184,63 @@ class DynamicContextPruner:
                         except (json.JSONDecodeError, AttributeError):
                             pass
 
-        # Remove all but the last write for each path
+        # Remove all but the last write for each path, together with all
+        # of each removed assistant message's tool results.
         indices_to_remove: set[int] = set()
         for path, indices in write_indices.items():
             if len(indices) > 1:
                 for idx in indices[:-1]:  # Keep last, remove earlier
                     indices_to_remove.add(idx)
-                    if idx + 1 < len(result.messages) and result.messages[idx + 1].get("role") == "tool":
-                        indices_to_remove.add(idx + 1)
 
         if indices_to_remove:
+            indices_to_remove = self._expanded_with_tool_results(result.messages, indices_to_remove)
             original_len = len(result.messages)
             result.messages = [
                 m for i, m in enumerate(result.messages) if i not in indices_to_remove
             ]
             result.superseded_writes = original_len - len(result.messages)
 
+    @staticmethod
+    def _expanded_with_tool_results(messages: list[dict[str, Any]], indices: set[int]) -> set[int]:
+        """Expand assistant message indices to include all of their tool results.
+
+        An assistant message may contain several parallel tool calls. Its
+        results are the consecutive tool messages that follow it and whose
+        tool_call_id matches one of its call ids. Removing only the first
+        one would orphan the rest, producing an invalid message sequence.
+        """
+        expanded: set[int] = set(indices)
+        for idx in indices:
+            call_ids = {
+                tc.get("id")
+                for tc in (messages[idx].get("tool_calls") or [])
+                if tc.get("id")
+            }
+            j = idx + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                if messages[j].get("tool_call_id") in call_ids:
+                    expanded.add(j)
+                    j += 1
+                else:
+                    break
+        return expanded
+
+    # ------------------------------------------------------------------
+    # Step 3 & 4 — retention-window aware in-place mutations
+    # ------------------------------------------------------------------
+
     def _truncate_errors(self, result: PruneResult) -> None:
         """Truncate long error messages and stack traces.
 
         Keep the first line (error type) and last 3 lines (most relevant frame).
+        Only applies to messages outside the retention window — the most
+        recent error output (the model's current diagnostic) is left verbatim.
         """
         error_pattern = re.compile(
             r"(Traceback|Error|Exception|FAILED|panic|fatal)", re.IGNORECASE
         )
 
-        for msg in result.messages:
+        for msg in self._mutable_messages(result):
             # Only truncate tool results and assistant messages, never user/system
             role = msg.get("role", "")
             if role in ("user", "system"):
@@ -184,9 +267,11 @@ class DynamicContextPruner:
         """Replace verbose tool result payloads with status summaries.
 
         Only strips results from older messages (not in retention window).
-        Keeps the tool name and a brief status indicator.
+        Keeps the tool name and a brief status indicator. The protected
+        tail is the live tool loop — recent file reads, listings, and
+        tool results stay verbatim so the model always sees fresh data.
         """
-        for msg in result.messages:
+        for msg in self._mutable_messages(result):
             if msg.get("role") == "tool":
                 content = msg.get("content", "")
                 if isinstance(content, str) and len(content) > 500:
@@ -197,3 +282,4 @@ class DynamicContextPruner:
                     msg["content"] = f"[Tool result ({status}): {preview}...]"
                     result.stripped_payloads += 1
                     result.tokens_saved_estimate += (original_len - len(msg["content"])) // 3
+

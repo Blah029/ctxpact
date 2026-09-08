@@ -40,7 +40,14 @@ class CompactionEngine:
 
     def __init__(self, config: CompactionConfig) -> None:
         self.config = config
-        self.pruner = DynamicContextPruner(config.stage1_dcp)
+        # Protect the live tool loop: the last retention_window messages
+        # are exempt from DCP error-truncation and payload stripping, so
+        # the model always sees its most recent file reads, listings,
+        # and tool results verbatim.
+        self.pruner = DynamicContextPruner(
+            config.stage1_dcp,
+            retention_window=config.stage2_summarize.retention_window,
+        )
         self.detector = SequenceDetector(
             retention_window=config.stage2_summarize.retention_window,
             eviction_window=config.stage2_summarize.eviction_window,
