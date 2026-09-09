@@ -34,6 +34,7 @@ class Summarizer:
         backend_url: str,
         model: str,
         api_key: str = "dummy",
+        chat_template_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send messages to the LLM for summarization.
 
@@ -45,6 +46,20 @@ class Summarizer:
             code_line_limit=self.code_line_limit,
         )
 
+        # Build payload — temperature stays 0.1 (factual summaries); provider
+        # sampling params deliberately do NOT apply to this direct call.
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": summary_messages,
+            "max_tokens": self.max_summary_tokens,
+            "temperature": 0.1,  # Low temp for factual summaries
+            "stream": False,
+        }
+        if chat_template_kwargs:
+            # Disable thinking (e.g. {"enable_thinking": false}) when the
+            # configured summarization provider defines it.
+            payload["chat_template_kwargs"] = chat_template_kwargs
+
         # Call the LLM
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -53,13 +68,7 @@ class Summarizer:
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "messages": summary_messages,
-                    "max_tokens": self.max_summary_tokens,
-                    "temperature": 0.1,  # Low temp for factual summaries
-                    "stream": False,
-                },
+                json=payload,
             )
             response.raise_for_status()
             data = response.json()

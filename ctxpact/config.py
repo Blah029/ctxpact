@@ -32,6 +32,13 @@ class ProviderConfig(BaseModel):
     connect_timeout_seconds: float = 5.0
     stream_timeout_seconds: float | None = None
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
+    # Optional per-provider sampling profile (e.g. instruct mode).
+    # When set, these keys OVERRIDE incoming request sampling params
+    # (e.g. temperature/top_p) in requests routed to this provider.
+    sampling_params: dict[str, Any] | None = None
+    # Sent verbatim to the backend (e.g. {"enable_thinking": false} for
+    # llama.cpp Qwen3 chat templates).
+    chat_template_kwargs: dict[str, Any] | None = None
 
 
 class CircuitBreakerConfig(BaseModel):

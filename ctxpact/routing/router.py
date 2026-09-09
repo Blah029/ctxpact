@@ -53,6 +53,45 @@ class ProviderRouter:
     def breakers(self) -> dict[str, CircuitBreaker]:
         return self._breakers
 
+    def resolve_provider(self, model: str | None) -> ProviderConfig | None:
+        """Find the provider whose public model id matches `model`.
+
+        Exact match first, then case-insensitive. Returns None if no match.
+        """
+        if not model:
+            return None
+        for provider in self._providers:
+            if provider.model == model:
+                return provider
+        for provider in self._providers:
+            if provider.model.casefold() == model.casefold():
+                return provider
+        return None
+
+    def _candidate_order(self, model: str | None) -> list[ProviderConfig]:
+        """Providers to try: model-matched first, then priority order."""
+        matched = self.resolve_provider(model)
+        if matched is None:
+            return list(self._providers)
+        return [matched] + [p for p in self._providers if p is not matched]
+
+    def _merged_kwargs(
+        self, provider: ProviderConfig, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge provider-level sampling settings over request kwargs.
+
+        Provider params win: a configured sampling profile (e.g. instruct
+        mode) overrides the client's sampling settings such as AnythingLLM's
+        workspace temperature. Providers without sampling_params are a pure
+        passthrough.
+        """
+        merged = dict(kwargs)
+        if provider.sampling_params:
+            merged.update(provider.sampling_params)
+        if provider.chat_template_kwargs is not None:
+            merged["chat_template_kwargs"] = provider.chat_template_kwargs
+        return merged
+
     def get_active_provider(self) -> ProviderConfig:
         """Get the highest-priority available provider."""
         for provider in self._providers:
@@ -67,15 +106,20 @@ class ProviderRouter:
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
+        model: str | None = None,
         **kwargs: Any,
     ) -> tuple[dict[str, Any], ProviderConfig]:
         """Route a non-streaming chat completion with failover.
+
+        If `model` matches a provider's public model id, that provider is
+        tried first (circuit-breaker failover still applies). Provider-level
+        sampling_params/chat_template_kwargs override the request kwargs.
 
         Returns (response_data, provider_used).
         """
         attempted: list[str] = []
 
-        for provider in self._providers:
+        for provider in self._candidate_order(model):
             breaker = self._breakers[provider.name]
 
             if not breaker.is_available and len(attempted) < len(self._providers) - 1:
@@ -95,7 +139,7 @@ class ProviderRouter:
                     model=provider.model,
                     messages=messages,
                     api_key=provider.api_key,
-                    **kwargs,
+                    **self._merged_kwargs(provider, kwargs),
                 )
                 await breaker.record_success()
                 return response, provider
@@ -120,16 +164,21 @@ class ProviderRouter:
     async def chat_completion_stream(
         self,
         messages: list[dict[str, Any]],
+        model: str | None = None,
         **kwargs: Any,
     ) -> tuple[AsyncIterator[str], ProviderConfig]:
         """Route a streaming chat completion with failover.
+
+        If `model` matches a provider's public model id, that provider is
+        tried first (circuit-breaker failover still applies). Provider-level
+        sampling_params/chat_template_kwargs override the request kwargs.
 
         Returns (sse_line_iterator, provider_used).
         Connection errors are caught eagerly (before iteration starts).
         """
         attempted: list[str] = []
 
-        for provider in self._providers:
+        for provider in self._candidate_order(model):
             breaker = self._breakers[provider.name]
 
             if not breaker.is_available and len(attempted) < len(self._providers) - 1:
@@ -149,7 +198,7 @@ class ProviderRouter:
                     model=provider.model,
                     messages=messages,
                     api_key=provider.api_key,
-                    **kwargs,
+                    **self._merged_kwargs(provider, kwargs),
                 )
                 # DO NOT record_success() here. The connection opened, but on a
                 # 32k model the backend can OOM mid-stream. We must wait until
