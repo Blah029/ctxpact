@@ -4,6 +4,9 @@
 # Custom configs
 config-*.yaml
 
+# Qwen self-optimise residuals
+bench/data/locomo-mc10/
+
 # Python
 __pycache__/
 *.py[cod]

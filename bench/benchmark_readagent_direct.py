@@ -17,11 +17,11 @@ from ctxpact.compaction.book import ConversationBook
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
 BOOK_PATH = os.environ.get("BENCH_BOOK", os.path.join(BENCH_DIR, "data", "frankenstein.txt"))
 PROVIDER_URL = os.environ.get("BENCH_PROVIDER", "http://localhost:8080/v1")
 MODEL = os.environ.get("BENCH_MODEL", "Qwen3.5-9B-Q8_0.gguf")
-BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
-TOKEN_BUDGET = 12000
+TOKEN_BUDGET = int(os.environ.get("READAGENT_TOKEN_BUDGET", "12000"))
 LABEL = sys.argv[1] if len(sys.argv) > 1 else "readagent-v1"
 
 QUERIES = [
@@ -118,7 +118,7 @@ async def run_query(extractor, book, q):
                 json={
                     "model": MODEL,
                     "messages": messages,
-                    "max_tokens": 1024,
+                    "max_tokens": 4096,
                     "temperature": 0.1,
                 },
             )

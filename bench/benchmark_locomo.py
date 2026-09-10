@@ -148,7 +148,7 @@ def start_ctxpact(strategy: str, log_path: str) -> subprocess.Popen:
         proc = subprocess.Popen(
             [
                 sys.executable, "-m", "ctxpact.server",
-                "--config", "config.yaml",
+                "--config", os.environ.get("CTXPACT_CONFIG", "config.yaml"),
                 "--local",
                 "--strategy", strategy,
             ],
@@ -252,7 +252,7 @@ def run_benchmark(
             result = api_call({
                 "model": model,
                 "messages": [{"role": "user", "content": full_input}],
-                "max_tokens": 256,
+                "max_tokens": 4096,
                 "temperature": 0.1,
             })
             elapsed = time.time() - start
