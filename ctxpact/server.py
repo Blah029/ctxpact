@@ -267,7 +267,12 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
         # ---- Compaction Check ----
         handoff_due = False
         if state.compaction:
-            active_provider = state.router.get_active_provider()
+            # Scope compaction to the provider this request targets
+            # (model-based routing), falling back to priority order.
+            active_provider = (
+                state.router.resolve_provider(body.get("model"))
+                or state.router.get_active_provider()
+            )
             should_compact, reason = state.compaction.should_compact(
                 messages=outgoing_messages,
                 max_context=active_provider.max_context,
@@ -305,6 +310,7 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
                         model=summarize_model,
                         max_context=summarize_provider.max_context,
                         api_key=summarize_provider.api_key,
+                        chat_template_kwargs=summarize_provider.chat_template_kwargs,
                     )
 
                     if result.compacted:
@@ -337,7 +343,10 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
         # ---- Oversized Input Handling (RLM or Chunking) ----
         from ctxpact.compaction.tokens import count_messages_tokens
 
-        active_provider = state.router.get_active_provider()
+        active_provider = (
+            state.router.resolve_provider(body.get("model"))
+            or state.router.get_active_provider()
+        )
         max_ctx = active_provider.max_context
         max_tokens_param = body.get("max_tokens", 1024)
         input_budget = int(max_ctx * 0.85) - max_tokens_param
@@ -474,7 +483,9 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
         try:
             if stream:
                 sse_iter, provider = await state.router.chat_completion_stream(
-                    messages=outgoing_messages, **forward_kwargs
+                    messages=outgoing_messages,
+                    model=body.get("model"),
+                    **forward_kwargs
                 )
 
                 async def stream_with_session():
@@ -515,7 +526,9 @@ def create_app(config: CtxpactConfig | None = None) -> FastAPI:
 
             else:
                 response, provider = await state.router.chat_completion(
-                    messages=outgoing_messages, **forward_kwargs
+                    messages=outgoing_messages,
+                    model=body.get("model"),
+                    **forward_kwargs
                 )
 
                 # Save assistant response to session
@@ -660,6 +673,16 @@ def main() -> None:
     logging.basicConfig(
         level=getattr(logging, config.server.log_level.upper()),
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    # Make the served model list visible at startup (e.g. --local strips
+    # providers, which would otherwise be silent).
+    logger.info(
+        "Serving providers: "
+        + ", ".join(
+            f"{p.name} (model={p.model}, priority={p.priority})"
+            for p in config.providers
+        )
     )
 
     app = create_app(config)

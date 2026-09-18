@@ -95,6 +95,7 @@ class CompactionEngine:
         model: str,
         max_context: int,
         api_key: str = "dummy",
+        chat_template_kwargs: dict[str, Any] | None = None,
     ) -> CompactionResult:
         """Run the two-stage compaction pipeline.
 
@@ -173,6 +174,7 @@ class CompactionEngine:
             backend_url=backend_url,
             model=model,
             api_key=api_key,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         # Reconstruct: [system] + [summary] + [retention_window]

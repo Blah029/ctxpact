@@ -48,6 +48,10 @@ llama-server -m Qwen3.5-9B-Q8_0.gguf \
 # Start ctxpact
 python -m ctxpact.server --config config.yaml --local --strategy readagent
 
+# NOTE: --local keeps ONLY the highest-priority provider and strips the rest,
+# so /v1/models (and therefore AnythingLLM's model picker) will only show that
+# one model. Omit --local to serve every provider in the config file.
+
 # Use it — same API as your LLM, just different port
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
